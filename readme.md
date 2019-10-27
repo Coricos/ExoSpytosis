@@ -29,12 +29,14 @@ The methods provided here are designed to automatically detect exocytosis events
 
 ## Current methodology:
 
+* First step is about determining the baseline (signal decomposition and reconstruction) to quantify the intensity decay over time.
+
 ![LOGO](./assets/baseline-removal.png)
 
-![LOGO](./assets/initialization.png)
+* Second step is about building a blurry mask to remove the background on each frame.
 
 ![LOGO](./assets/background-removal.png)
 
-![LOGO](./assets/general-events.png)
+* Final step do target event reconstruction based on obtained points of interest, through the multiprocessed extraction of those points of video chunks (memory and time efficient), inputed into a KDTree to build a connected graph based on a mixed metric (accounting for both spatial and temporal resolutions). The graph is post-processed through unsupervised labeling (pure distance metric), and events considered close enough are fusionned. The final visualization is presented here under.
 
-![LOGO](./assets/roi-example.png)
+![LOGO](./assets/event-detection.png)
