@@ -23,6 +23,10 @@ python -m ipykernel install --user --name=exospytosis
 
 ![LOGO](./assets/event-spotting.png)
 
+Using fluorescent false neurotransmitters (FFNs), which are fluorescent analogs of natural ("true") neurotransmitters, we are able to label vesicles in live cells with enough signal to permit imaging at high frequencies (up to 800 Hz).
+
+The methods provided here are designed to automatically detect exocytosis events in live cell recordings.
+
 ## Current methodology:
 
 ![LOGO](./assets/baseline-removal.png)
