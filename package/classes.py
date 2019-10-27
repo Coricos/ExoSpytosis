@@ -43,8 +43,8 @@ class VideoChunk:
         with ND2Reader(self.pth) as fle:
             for idx in range(chunksize):
                 img = np.asarray(fle[idx], dtype=np.uint8)
-                img[img <= self.bsl[idx]] = self.bsl[idx]
-                self.msk[:,:,idx] = (img - self.bsl[idx]).astype('int')
+                #img[img <= self.bsl[idx]] = self.bsl[idx]
+                self.msk[:,:,idx] = img.astype('int')
         
         if graph:
             
@@ -54,20 +54,23 @@ class VideoChunk:
             sns.heatmap(np.std(self.msk, axis=-1))
             plt.subplot(1,2,2)
             plt.title('MAX Heatmap Initialization')
-            sns.heatmap(np.max(self.msk, axis=-1))
+            msk = np.max(self.msk, axis=-1)
+            msk = rank.mean(msk, selem=disk(5))
+            sns.heatmap(msk)
             plt.tight_layout()
             plt.show()
 
         # Extract the mask looked for
         self.msk = np.max(self.msk, axis=-1)
+        self.msk = rank.mean(self.msk, selem=disk(5))
     
     def get_frame(self, index):
     
         with ND2Reader(self.pth) as fle: 
 
-            return np.asarray(fle[index], dtype=np.uint8) - self.bsl[index]
+            return np.asarray(fle[index], dtype=np.uint8) - self.msk
     
-    def get(self, start_slice, chunksize=512, alpha=2.0):
+    def get(self, start_slice, chunksize=512, threshold=100.0):
         
         chunk = np.zeros((*self.DIM, chunksize))
         inits = np.zeros((*self.DIM, chunksize))
@@ -76,10 +79,15 @@ class VideoChunk:
             for idx in range(chunksize):
                 img = np.asarray(fle[idx+start_slice], dtype=np.uint8)
                 inits[:,:,idx] = img
-                img[img <= self.bsl[idx+start_slice]] = self.bsl[idx+start_slice]
-                img = img - self.bsl[idx+start_slice] - self.msk
-                img[img < 0] = 0
-                chunk[:,:,idx] = img.astype('int')
+                img = img - self.msk
+                img[img < threshold] = 0
+                img[img > 0] = 1
+                img = binary_dilation(img.astype(np.int8), selem=disk(1))
+                #img = np.round(np.abs(gaussian(img, sigma=3) - 1)).astype(np.uint8)
+                #if idx-1 >= 0: chunk[:,:,idx-1] += img
+                chunk[:,:,idx] += img
+                #if idx+1 < chunksize: chunk[:,:,idx+1] += img
+                del img
     
         return inits, chunk
 
