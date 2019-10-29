@@ -39,4 +39,4 @@ Using fluorescent false neurotransmitters (FFNs), which are fluorescent analogs 
 
 * **Fifth step**: It becomes then necessary to filter those events due to unexpected behavior of false positives. To do so, we first compute the convex hull of each cloud point relative to each event. This gives us access to area and volume metrics, which are used to delete events that would be too small to be even considered. We then enhance and reclaim the zones of interest by using the centroids of the obtained events, and building the 5x5 ROI as used by the statistical approach so far.
 
-![LOGO](./assets/event-reconstruction.png)
+![LOGO](./assets/events-reconstruction.png)
