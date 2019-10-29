@@ -5,91 +5,213 @@
 try: from package.utils import *
 except: from utils import *
 
-class VideoChunk:
+# Multiprocessing related wrappers
+
+def mp_noiselevel(index, filename, percentile):
     
-    DIM = (256, 256)
+    with ND2Reader(filename) as fle: img = np.asarray(fle[index])
+    return np.percentile(Frame(img).getBackground(), percentile)
+
+def mp_get_frames(index, filename):
     
-    def __init__(self, filename='data-qbi-hackathon/video.nd2', graph=False):
+    with ND2Reader(filename) as fle: return Frame(np.asarray(fle[index])).img
+    
+def mp_extraction(index, filename, noise, background):
+    
+    with ND2Reader(filename) as fle: frm = Frame(np.asarray(fle[index]))
+    x,y = np.where(frm.applyFilters(noise, background))
+    return np.vstack((x, y, np.full(len(x), index))).T
+
+# General classes
+
+class Frame:
+    
+    def __init__(self, image):
         
+        self.img = np.clip(image, 0, 255) / 255.0
+        self.dim = image.shape
+        
+    def getMasks(self, threshold=0.1):
+        
+        sig = estimate_sigma(self.img, average_sigmas=False, multichannel=False)
+        blr = snd.gaussian_filter(self.img, sigma=sig)
+        thr = threshold_otsu(blr)
+        bry = (blr >= thr)
+        new = binary_opening(bry)
+        
+        new = snd.morphology.binary_fill_holes(new)
+        mat = np.array([[0, 0, 1, 1, 1, 0, 0],
+                        [0, 1, 1, 1, 1, 1, 0],
+                        [1, 1, 1, 1, 1, 1, 1],
+                        [1, 1, 1, 1, 1, 1, 1],
+                        [1, 1, 1, 1, 1, 1, 1],
+                        [0, 1, 1, 1, 1, 1, 0],
+                        [0, 0, 1, 1, 1, 0, 0]])
+        msk = binary_dilation(new, selem=mat)
+        
+        warnings.simplefilter('ignore')
+        msk = rank.mean(msk.astype('float'), selem=disk(16))
+        out = np.where(msk > threshold, 0, 1).astype('bool')
+        ins = np.where(msk <= threshold, 0, 1).astype('bool')
+
+        # Memory efficiency
+        del sig, blr, thr, bry, msk
+              
+        return ins, out
+     
+    def getBackground(self, threshold=0.1):
+        
+        # Retrieve the decomposition
+        _,m = self.getMasks()
+        # Apply the mask
+        return self.img[m]
+    
+    def maskOnNoise(self, noise_level):
+        
+        return np.where(self.img < noise_level, 0, 1)
+    
+    def maskOnBackground(self, background):
+        
+        return np.where(self.img < background, 0, 1)
+        
+    def applyFilters(self, noise, background, threshold=0.1, sizes=(2,3,1,3)):
+
+        # Look for the masks
+        m,_ = self.getMasks(threshold=threshold)
+        m_0 = self.maskOnNoise(noise)
+        m_1 = self.maskOnBackground(background)
+    
+        # Override image
+        self.img = (self.img*m*m_0*m_1 * 255.0).astype(np.uint8)
+        
+        # Post-process the results
+        self.img = binary_dilation(self.img, selem=disk(sizes[0]))
+        self.img = binary_erosion(self.img, selem=disk(sizes[1]))
+        self.img = gaussian(self.img, sigma=sizes[2])
+        self.img = binary_erosion(self.img, selem=disk(sizes[3]))
+        
+        return np.where(self.img > 1e-2, 1, 0).astype(np.uint8)
+
+class Video:
+    
+    def __init__(self, filename, verbose=False):
+        
+        self.vrb = verbose
         self.pth = filename
         # Extract attributes
         with ND2Reader(self.pth) as fle:
             self.cnt = fle.metadata['num_frames']
             self.rte = fle.metadata['experiment']['loops'][0]['sampling_interval']
+        
         # Run the initialization
-        self.initialize(graph=graph)      
- 
-    def initialize(self, chunksize=3500, lam=1e9, p=0.01, graph=False):
-        
-        self.mus = np.zeros(self.cnt)
-        # Aggregate the general evolution of the means
-        with ND2Reader(self.pth) as fle: 
-            for idx in range(self.cnt): 
-                self.mus[idx] = np.mean(np.asarray(fle[idx], dtype=np.uint8))
-        # Build the relative baseline
-        self.bsl = baseline(self.mus, 1e9, 0.001)
-        
-        if graph:
-            
-            plt.figure(figsize=(18,4))
-            plt.plot(self.mus, color='crimson', label='Raw Serie - Means per Frame')
-            plt.plot(self.bsl, color='black', label='Estimated Baseline from Raw Serie')
-            plt.legend(loc='upper right')
-            plt.yticks([])
-            plt.show()
-    
-        self.msk = np.zeros((256, 256, chunksize), dtype=np.uint8)
-        # Instantiate the mask
-        with ND2Reader(self.pth) as fle:
-            for idx in range(chunksize):
-                img = np.asarray(fle[idx], dtype=np.uint8)
-                #img[img <= self.bsl[idx]] = self.bsl[idx]
-                self.msk[:,:,idx] = img.astype('int')
-        
-        if graph:
-            
-            plt.figure(figsize=(18,7))
-            plt.subplot(1,2,1)
-            plt.title('STD Heatmap Initialization')
-            sns.heatmap(np.std(self.msk, axis=-1))
-            plt.subplot(1,2,2)
-            plt.title('MAX Heatmap Initialization')
-            msk = np.max(self.msk, axis=-1)
-            msk = rank.mean(msk, selem=disk(5))
-            sns.heatmap(msk)
-            plt.tight_layout()
-            plt.show()
+        self._estimate_noiselevel()
+        self._estimate_background()
 
-        # Extract the mask looked for
-        self.msk = np.max(self.msk, axis=-1)
-        self.msk = rank.mean(self.msk, selem=disk(5))
-    
-    def get_frame(self, index):
-    
-        with ND2Reader(self.pth) as fle: 
+    def _estimate_noiselevel(self, pad=50, percentile=99, max_threads=cpu_count()):
+        
+        t_0 = time.time()
 
-            return np.asarray(fle[index], dtype=np.uint8) - self.msk
-    
-    def get(self, start_slice, chunksize=512, threshold=100.0):
+        with Pool(processes=max_threads) as pol:
+            fun = partial(mp_noiselevel, filename=self.pth, percentile=percentile)
+            res = np.asarray(pol.map(fun, np.arange(0, self.cnt, pad)))
+            pol.close()
+            
+        self.lvl = np.mean(res)
+
+        if self.vrb: print('# Noise level extracted in {} seconds'.format(np.round(time.time()-t_0, 3)))
         
-        chunk = np.zeros((*self.DIM, chunksize))
-        inits = np.zeros((*self.DIM, chunksize))
+        # Memory efficiency
+        del fun, res, pol
         
-        with ND2Reader(self.pth) as fle: 
-            for idx in range(chunksize):
-                img = np.asarray(fle[idx+start_slice], dtype=np.uint8)
-                inits[:,:,idx] = img
-                img = img - self.msk
-                img[img < threshold] = 0
-                img[img > 0] = 1
-                img = binary_dilation(img.astype(np.int8), selem=disk(1))
-                #img = np.round(np.abs(gaussian(img, sigma=3) - 1)).astype(np.uint8)
-                #if idx-1 >= 0: chunk[:,:,idx-1] += img
-                chunk[:,:,idx] += img
-                #if idx+1 < chunksize: chunk[:,:,idx+1] += img
-                del img
+    def _estimate_background(self, frames=(1000, 3000, 10), percentile=90, max_threads=cpu_count()):
+
+        t_0 = time.time()
+        
+        with Pool(processes=max_threads) as pol:
+            fun = partial(mp_get_frames, filename=self.pth)
+            res = pol.map(fun, np.arange(*frames))
+            pol.close()
+            
+        warnings.simplefilter('ignore')
+        self.bkg = np.percentile(res, percentile, axis=0)
+        m_x = self.bkg.max()
+        self.bkg = rank.mean(self.bkg, selem=disk(10)) / 255.0
+        self.bkg = self.bkg * (m_x / self.bkg.max())
+
+        if self.vrb: print('# Static background estimated in {} seconds'.format(np.round(time.time()-t_0, 3)))
+        
+        # Memory efficiency
+        del fun, res, pol
     
-        return inits, chunk
+    def visualizeFiltering(self, index, threshold=0.1):
+        
+        with ND2Reader(self.pth) as fle: frm = Frame(np.asarray(fle[index]))
+        
+        # Retrieve the decomposition
+        _,m = frm.getMasks(threshold=threshold)
+        m_0 = frm.maskOnNoise(self.lvl)
+        m_1 = frm.maskOnBackground(self.bkg)
+        
+        arg = {'vmin': 0, 'vmax': 1}
+        
+        plt.figure(figsize=(18,4))
+        plt.subplot(1,5,1)
+        plt.title('Initial Image')
+        plt.imshow(frm.img, **arg)
+        plt.xticks([])
+        plt.yticks([])
+        plt.subplot(1,5,2)
+        plt.title('Estimate Contours')
+        plt.imshow(m, **arg)
+        plt.xticks([])
+        plt.yticks([])
+        plt.subplot(1,5,3)
+        plt.title('Noise Thresholding')
+        plt.imshow(m_0, **arg)
+        plt.xticks([])
+        plt.yticks([])
+        plt.subplot(1,5,4)
+        plt.title('Background Thresholding')
+        plt.imshow(m_1, **arg)
+        plt.xticks([])
+        plt.yticks([])
+        plt.subplot(1,5,5)
+        plt.title('Post-processed Masks')
+        plt.imshow(frm.applyFilters(self.lvl, self.bkg), **arg)
+        plt.xticks([])
+        plt.yticks([])
+        plt.tight_layout()
+        plt.show()
+        
+    def process(self, max_distance=3, max_threads=cpu_count()):
+        
+        t_0 = time.time()
+
+        fun = partial(mp_extraction, filename=self.pth, noise=self.lvl, background=self.bkg)
+        # Multiprocessed extraction of the points of interest
+        with Pool(processes=max_threads) as pol:
+            res = pol.map(fun, np.arange(self.cnt))
+            pol.close()
+        pts = np.vstack(res)
+
+        if self.vrb: print('# Points of interest extracted in {} seconds'.format(np.round(time.time()-t_0, 3)))
+        t_0 = time.time()
+        
+        # Run density-based clustering
+        cls = DBSCAN(eps=max_distance, n_jobs=max_threads).fit_predict(pts)
+
+        if self.vrb: print('# Event clustering in {} seconds'.format(np.round(time.time()-t_0, 3)))
+        
+        # First event estimation
+        list_events = []    
+        for crd in np.unique(cls):
+            list_points = [Point(*c) for c in pts[np.where(cls == crd)[0],:]]
+            list_events.append(Event(list_points, crd))
+            
+        # Memory efficiency
+        del fun, res, pol, pts, cls
+            
+        return list_events
 
 class Point:
     
@@ -101,141 +223,89 @@ class Point:
         
     def distance(self, point):
         
-        return np.sqrt((point.x - self.x)**2 + (point.y - self.y)**2 + (point.z - self.z)**2)
-
+        return np.sqrt((point.x - self.x)**2 + (point.y - self.y)**2) + np.abs(point.z - self.z)
+    
 class Event:
     
-    def __init__(self, origin, layer):
+    def __init__(self, points, roi):
         
-        self.pts = [origin]
-        self.lyr = layer
+        self.roi = roi
+        self.pts = points
     
-    def distance(self, point):
+    def distance(self, event):
         
-        return np.min([pts.distance(point) for pts in self.pts])
+        dis = []
+        for point in self.pts:
+            dis.append(np.min([pts.distance(point) for pts in self.pts]))
+        return np.min(dis)
     
     def fusion(self, event):
         
         self.pts += event.pts
-        self.lyr = max(self.lyr, event.lyr)
+        
+    def getPoints(self):
+        
+        try: return np.vstack([[p.x, p.y, p.z, self.roi] for p in self.pts])
+        except: return None
         
     def duration(self):
         
         dur = [point.z for point in self.pts]
-        return np.max(dur) + 1 - np.min(dur)
-       
-class Extractor:
+        return np.max(dur) + 1 - np.min(dur)  
     
-    def __init__(self, threshold, min_distance):
+    def getAreaVolume(self):
         
-        self.thr = threshold
-        self.m_d = min_distance
+        slc = np.vstack([[p.x, p.y, p.z] for p in self.pts])
         
-    @staticmethod
-    def acquisition_distance(event_1, event_2):
-    
-        return np.min([event_2.distance(point) for point in event_1.pts])
-    
-    def from_3d_chunk(self, chunk, layer):
-        
-        # Extract non-lonely points
-        x, y, z = np.where(chunk > self.thr[layer])
-        z += layer*chunk.shape[2]
-        pts = np.vstack((x, y, z)).T
-        
-        if len(pts) < 2: 
-            return []
-        
-        else:
-            # Build the graph of connections
-            kdt = KDTree(pts, leaf_size=3, metric='euclidean')
-            dst = kdt.query(pts[:,:], k=2)[0]
-            dst = np.asarray([d[1] for d in dst])
-            msk = dst < self.m_d[layer]
-
-            # Sort the points based on their temporal dimension
-            x, y, z = x[msk], y[msk], z[msk]
-            idx = np.argsort(z)
-            x, y, z = x[idx], y[idx], z[idx]
-
-            # Build the initial list of events
-            events = []
-            for u, v, w in zip(x, y, z):
-
-                if len(events) == 0: 
-                    events.append(Event(Point(u, v, w), layer))
-
-                else:
-                    pts = Point(u, v, w)
-                    evt = sorted(events, key=lambda x: x.distance(pts))
-                    if evt[0].distance(pts) > self.m_d[layer]: events.append(Event(pts, layer))
-                    else: evt[0].pts.append(pts)
-
-            return [e for e in events if (e.duration() > 1) & (len(e.pts) > 5)]
-        
-    def fusion_events(self, events, alpha=2.0):
-        
-        if len(events) == 0:
-            return []
-                    
-        else:           
-            # Apply an efficient layer-based mask
-            lyr = np.asarray([e.lyr for e in events])
-            msk = np.where(lyr >= max(lyr)-1)[0]
+        if len(np.unique(slc[:,2])) == 1: 
+            ull = ConvexHull(points=slc[:,:2])
+        else: 
+            ull = ConvexHull(points=slc[:,:])
             
-            # Compute the pairwise distance matrix
-            mat = np.zeros((len(events), len(events)))
-            for i in range(len(events)):
-                for j in range(i+1, len(events)):
-                    if (i in msk) and (j in msk):
-                        mat[i,j] = np.min([events[i].distance(point) for point in events[j].pts])
-
-            # Refilter the points based on their relationships
-            idx = np.vstack(np.where((mat < alpha*self.m_d[max(lyr)]) & (mat > 0.0)))
-            idx = idx[:,idx[0,:] < idx[1,:]]
-
-            # Fusion events if they turn out to be close enough
-            fusions = []
-            for i in range(idx.shape[1]): 
-                if len(fusions) == 0: 
-                    fusions.append(list(idx[:,i]))
-                else:
-                    boo = False
-                    i,j = idx[:,i]
-                    for fusion in fusions: 
-                        if (i in fusion) or (j in fusion):
-                            fusion += [i, j]
-                            boo = True
-                            break
-                    if not boo: fusions.append([i, j])
-            
-            # Apply final filtering
-            fusions = [list(np.unique(fusion)) for fusion in fusions]
-            for fusion in fusions: _ = [events[fusion[0]].fusion(events[i]) for i in fusion[1:]]
-            evt, fus = [], []
-            for fusion in fusions: fus += fusion[1:]
-            for i, e in enumerate(events):
-                if i not in fus: evt.append(e)
-
-            return evt
+        return (ull.area, ull.volume)
     
-    def display_3d_events(self, events):
+    def focus(self):
         
-        if len(events) == 0: 
-            return None
+        disk_points = []
+        mat = self.getPoints()
         
-        else:
-            pts, cls, roi = [], [], 1
-            for event in events:
-                for point in event.pts: 
-                    pts.append([point.x, point.y, point.z])
-                    cls.append(roi)
-                roi += 1
+        x = int(np.round(np.median(mat[:,0])))
+        y = int(np.round(np.median(mat[:,1])))
+        self.cen = (x, y)
 
-            pts, cls = np.asarray(pts), np.asarray(cls)
-            x, y, z = pts[:,0], pts[:,1], pts[:,2]
+        for u_z in np.unique(mat[:,2]):
+            u,v = np.meshgrid(np.arange(x-2, x+3), np.arange(y-2, y+3))
+            m_z = np.full(len(u), u_z).reshape(-1,1)
+            for u_x in u:
+                for u_y in v: 
+                    disk_points += list(np.hstack((u_x.reshape(-1,1), u_y.reshape(-1,1), m_z)))
 
-            arg = {'mode': 'markers', 'marker': dict(size=4, color=cls)}
-            fig = go.Figure(data=[go.Scatter3d(x=x, y=y, z=z, **arg)])
-            fig.update_layout(margin=dict(l=0, r=0, b=0, t=0))
-            fig.show()
+        self.pts = [Point(*p) for p in disk_points]
+
+class EventManager:
+    
+    def __init__(self, events):
+        
+        self.evt = events
+        
+    def filterAreaVolume(self, min_area=10, min_volume=10):
+        
+        list_evt = []
+        for event in self.evt: 
+            a,v = event.getAreaVolume()
+            if (a > min_area) and (v > min_volume): list_evt.append(event)
+        self.evt = list_evt
+        
+    def focusAreas(self):
+        
+        for event in self.evt: event.focus()
+        
+    def display(self):
+        
+        points = np.vstack([e.getPoints() for e in self.evt if len(e.pts) > 0])
+        
+        x,y,z = points[:,0], points[:,1], points[:,2]
+        arg = {'mode': 'markers', 'marker': dict(size=3, color=points[:,3])}
+        fig = go.Figure(data=[go.Scatter3d(x=x, y=y, z=z, **arg)])
+        fig.update_layout(margin=dict(l=0, r=0, b=0, t=0))
+        fig.show()

@@ -21,22 +21,22 @@ python -m ipykernel install --user --name=exospytosis
 
 ## What we aim at solving:
 
+Using fluorescent false neurotransmitters (FFNs), which are fluorescent analogs of natural ("true") neurotransmitters, we are able to label vesicles in live cells with enough signal to permit imaging at high frequencies (up to 800 Hz). The methods provided here are designed to automatically detect exocytosis events in live cell recordings.
+
 ![LOGO](./assets/event-spotting.png)
-
-Using fluorescent false neurotransmitters (FFNs), which are fluorescent analogs of natural ("true") neurotransmitters, we are able to label vesicles in live cells with enough signal to permit imaging at high frequencies (up to 800 Hz).
-
-The methods provided here are designed to automatically detect exocytosis events in live cell recordings.
 
 ## Current methodology:
 
-* First step is about determining the baseline (signal decomposition and reconstruction) to quantify the intensity decay over time.
+* **First step**: The algorithm determines the noise levels over time to quantify temporal decay. It is done through the masking of frames to extract the cell and keep the background noise. This single quantification allow us to precisely threshold noise levels, and thus enhance signal over noise ratio.
 
-![LOGO](./assets/baseline-removal.png)
+* **Second step**: Estimates the background based on a selection of the beginning of the video, determined as static.
 
-* Second step is about building a blurry mask to remove the background on each frame.
+* **Third step**: Apply background subtraction and noise thresholding in each frame. This method has been made independent to open the door to multi-processing, and thus memory-efficiency and time-efficiency as well.
 
-![LOGO](./assets/background-removal.png)
+![LOGO](./assets/image-processing.png)
 
-* Final step do target event reconstruction based on obtained points of interest, through the multiprocessed extraction of those points of video chunks (memory and time efficient), inputed into a KDTree to build a connected graph based on a mixed metric (accounting for both spatial and temporal resolutions). The graph is post-processed through unsupervised labeling (pure distance metric), and events considered close enough are fusionned. The final visualization is presented here under.
+* **Fourth step**: Based on the extracted point of interest, a 3D mask is available to represent the high intensity zones of the video. The question was then about being robust to cell movement, and possible sparse zones due to the thresholding techniques. The methodology here is to actually expand each pixel to its closest neighboars, and use a density-based clustering approach. This gives us an annotated 3D mask with clusters, considered as independent events.
 
-![LOGO](./assets/event-detection.png)
+* **Fifth step**: It becomes then necessary to filter those events due to unexpected behavior of false positives. To do so, we first compute the convex hull of each cloud point relative to each event. This gives us access to area and volume metrics, which are used to delete events that would be too small to be even considered. We then enhance and reclaim the zones of interest by using the centroids of the obtained events, and building the 5x5 ROI as used by the statistical approach so far.
+
+![LOGO](./assets/event-reconstruction.png)
