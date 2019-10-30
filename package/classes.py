@@ -94,10 +94,11 @@ class Frame:
 
 class Video:
     
-    def __init__(self, filename, verbose=False):
+    def __init__(self, filename, verbose=False, max_threads=cpu_count()):
         
         self.vrb = verbose
         self.pth = filename
+        self.cpu = max_threads
         # Extract attributes
         with ND2Reader(self.pth) as fle:
             self.cnt = fle.metadata['num_frames']
@@ -107,14 +108,17 @@ class Video:
         self._estimate_noiselevel()
         self._estimate_background()
 
-    def _estimate_noiselevel(self, pad=50, percentile=99, max_threads=cpu_count()):
+    def _estimate_noiselevel(self, pad=50, percentile=99):
         
         t_0 = time.time()
+        fun = partial(mp_noiselevel, filename=self.pth, percentile=percentile)
 
-        with Pool(processes=max_threads) as pol:
-            fun = partial(mp_noiselevel, filename=self.pth, percentile=percentile)
-            res = np.asarray(pol.map(fun, np.arange(0, self.cnt, pad)))
-            pol.close()
+        if self.cpu == 1:
+            res = np.asarray([fun(idx) for idx in np.arange(0, self.cnt, pad)])
+        else:
+            with Pool(processes=self.cpu) as pol:
+                res = np.asarray(pol.map(fun, np.arange(0, self.cnt, pad)))
+                pol.close()
             
         self.lvl = np.mean(res)
 
@@ -123,14 +127,17 @@ class Video:
         # Memory efficiency
         del fun, res, pol
         
-    def _estimate_background(self, frames=(1000, 3000, 10), percentile=90, max_threads=cpu_count()):
+    def _estimate_background(self, frames=(1000, 3000, 10), percentile=90):
 
         t_0 = time.time()
-        
-        with Pool(processes=max_threads) as pol:
-            fun = partial(mp_get_frames, filename=self.pth)
-            res = pol.map(fun, np.arange(*frames))
-            pol.close()
+        fun = partial(mp_get_frames, filename=self.pth)
+
+        if self.cpu == 1:
+            res = [fun(idx) for idx in np.arange(*frames)]
+        else:
+            with Pool(processes=self.cpu) as pol:
+                res = pol.map(fun, np.arange(*frames))
+                pol.close()
             
         warnings.simplefilter('ignore')
         self.bkg = np.percentile(res, percentile, axis=0)
@@ -183,22 +190,24 @@ class Video:
         plt.tight_layout()
         plt.show()
         
-    def process(self, max_distance=3, max_threads=cpu_count()):
+    def process(self, max_distance=3):
         
         t_0 = time.time()
-
         fun = partial(mp_extraction, filename=self.pth, noise=self.lvl, background=self.bkg)
-        # Multiprocessed extraction of the points of interest
-        with Pool(processes=max_threads) as pol:
-            res = pol.map(fun, np.arange(self.cnt))
-            pol.close()
+        
+        if self.cpu == 1:
+            res = [fun(idx) for idx in np.arange(self.cnt)]
+        else:
+            with Pool(processes=self.cpu) as pol:
+                res = pol.map(fun, np.arange(self.cnt))
+                pol.close()
         pts = np.vstack(res)
 
         if self.vrb: print('# Points of interest extracted in {} seconds'.format(np.round(time.time()-t_0, 3)))
         t_0 = time.time()
         
         # Run density-based clustering
-        cls = DBSCAN(eps=max_distance, n_jobs=max_threads).fit_predict(pts)
+        cls = DBSCAN(eps=max_distance, n_jobs=self.cpu).fit_predict(pts)
 
         if self.vrb: print('# Event clustering in {} seconds'.format(np.round(time.time()-t_0, 3)))
         
