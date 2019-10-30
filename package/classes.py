@@ -125,7 +125,9 @@ class Video:
         if self.vrb: print('# Noise level extracted in {} seconds'.format(np.round(time.time()-t_0, 3)))
         
         # Memory efficiency
-        del fun, res, pol
+        del fun, res
+        if self.cpu > 1: # delete pol only if more than one thread used
+            del pol
         
     def _estimate_background(self, frames=(1000, 3000, 10), percentile=90):
 
@@ -148,7 +150,9 @@ class Video:
         if self.vrb: print('# Static background estimated in {} seconds'.format(np.round(time.time()-t_0, 3)))
         
         # Memory efficiency
-        del fun, res, pol
+        del fun, res
+        if self.cpu > 1: # delete pol only if more than one thread used
+            del pol
     
     def visualizeFiltering(self, index, threshold=0.1):
         
@@ -218,7 +222,9 @@ class Video:
             list_events.append(Event(list_points, crd))
             
         # Memory efficiency
-        del fun, res, pol, pts, cls
+        del fun, res, pts, cls
+        if self.cpu > 1: # delete pol only if more than one thread used
+            del pol
             
         return list_events
 
