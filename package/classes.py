@@ -324,3 +324,106 @@ class EventManager:
         fig = go.Figure(data=[go.Scatter3d(x=x, y=y, z=z, **arg)])
         fig.update_layout(margin=dict(l=0, r=0, b=0, t=0))
         fig.show()
+    
+    def getEventContours(self,out=True):
+        '''
+        Get the max & min values of x, y, z for each event and store in numpy
+        array
+        
+        If out is set to "True", return the event countours
+        '''
+        Res = np.zeros((len(self.evt),6),dtype=np.int_)
+        Res = pd.DataFrame(Res,columns = ['x_min','x_max','y_min','y_max','z_min','z_max'])
+        for idx in range(len(self.evt)):
+            e = self.evt[idx]
+            Pts = e.getPoints()
+            Res.loc[idx,['x_min','y_min','z_min']] = np.amin(Pts[:,:-1],axis=0)
+            Res.loc[idx,['x_max','y_max','z_max']] = np.amax(Pts[:,:-1],axis=0)
+        self.Contours = Res
+        if out:
+            return Res
+    
+    def MapROI(self,ROI,x_err=5,y_err=5,z_err=9):
+        '''
+        Map a given ROI to its corresponding event using the following criteria:
+            
+            Spatially event should not be more than 5 pixels off from ROI
+            Temporally event should not be more than 10 frames off from ROI
+            
+            Criteria can be altered by changing the values of x_err, y_err, & z_err
+            
+        Arguments:
+            ROI: ROI object containing x, y, z, width, & length info
+            x_err,y_err,z_err: int, the error tolerance (pixels for x_err, y_err, frames for z_err)
+            
+        Returns:
+            numpy array containing the event roi index, empty if no 
+            corresponding event found.
+        '''
+        try:
+            Cntrs = self.Contours
+        except:
+            Cntrs = self.getEventContours()
+        I_x = ~((Cntrs['x_max'] < ROI.x-x_err) | (Cntrs['x_min'] > ROI.x+ROI.w+x_err))
+        I_y = ~((Cntrs['y_max'] < ROI.y-y_err) | (Cntrs['y_min'] > ROI.y+ROI.h+y_err))
+        I_z = ~((Cntrs['z_max'] < ROI.z-z_err) | (Cntrs['z_min'] > ROI.z+z_err))
+        IDX = I_x & I_y & I_z
+        return np.where(IDX)[0]
+    
+    def MapROIs(self,RS,*args,**kwargs):
+        '''
+        Map a given set of ROIs to their corresponding events
+        
+        Arguments:
+            RS: ROISet object
+            *args, **kwargs will be passed to MapROI method
+        
+        Returns:
+            dictionary with ROI names as keys
+        '''
+        ans = {}
+        for idx in range(RS.size):
+            r = RS.ROIs[idx]
+            name = RS.ROI_list.iloc[idx]
+            ans[name] = self.MapROI(r,*args,**kwargs)
+        return ans
+    
+class ROI(object):
+    def __init__(self,bx,by,width,height,z,pixel_res=1):
+        '''
+        bx: horizontal coordinate of the top left corner
+        by: vertical coordinate of the top left corner
+        width: horizontal length of the ROI box
+        height: vertical length of the ROI box
+        z: Slice
+        pixel_res: float. factor to convert units into pixel number
+        '''
+        # Invert the x and y axes so as to be compatible with numpy indexing
+        self.x = round(by/pixel_res)
+        self.y = round(bx/pixel_res)
+        self.h = round(width/pixel_res)
+        self.w = round(height/pixel_res)
+        self.z = int(z)
+        
+        
+class ROISet(object):
+    def __init__(self,path,pixel_res=1):
+        '''
+        path: str, specifies a .csv files with ROI information
+        pixel_res: float. Unit per pixel conversion factor if ROIs are not
+                   specified in pixels
+        '''
+        df = pd.read_csv(path,index_col=0)
+        # Infer ROI names
+        ind = df.index.copy().astype(str)
+        ind = ind.str.rjust(3,'0')
+        self.ROI_list = pd.Series('ROI' + ind,index=df.index) # Store the list of ROIs
+        # Get total number of ROIs in set
+        self.size = ind.size
+        # Create separate ROI obejct for each element in set
+        ls = []
+        for idx in range(self.size):
+            params = df.iloc[idx][['BX','BY','Width','Height','Slice']]
+            roi = ROI(*params,pixel_res)
+            ls.append(roi)
+        self.ROIs = ls
